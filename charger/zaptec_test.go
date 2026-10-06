@@ -2,10 +2,14 @@ package charger
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/evcc-io/evcc/charger/zaptec"
 	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/request"
+	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -140,4 +144,45 @@ func TestZaptecConnectionDurationIgnoresEmptySession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "b", c.session)
 	assert.NotEqual(t, start, c.sessionStart)
+}
+
+func TestZaptecEnableIgnoresRejectedResume(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{"accepted", http.StatusOK, `{}`, false},
+		{"528 not paused", http.StatusInternalServerError, `{"Code":528,"Details":"Charging is not Paused nor Scheduled; Resume command cannot be sent"}`, false},
+		{"520 without details", http.StatusInternalServerError, `{"Code":520,"Details":null}`, false},
+		{"other error", http.StatusInternalServerError, `{"Code":500,"Details":null}`, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Zaptec{
+				Helper:   request.NewHelper(util.NewLogger("test")),
+				instance: zaptec.Charger{Id: "id"},
+				statusG: util.ResettableCached(func() (zaptec.StateResponse, error) {
+					return nil, nil
+				}, 0),
+			}
+
+			httpmock.ActivateNonDefault(c.Client)
+			defer httpmock.DeactivateAndReset()
+
+			uri := fmt.Sprintf("%s/api/chargers/id/sendCommand/%d", zaptec.ApiURL, zaptec.CmdResumeCharging)
+			httpmock.RegisterResponder(http.MethodPost, uri, httpmock.NewStringResponder(tt.status, tt.body))
+
+			err := c.Enable(true)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.False(t, c.enabled)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, c.enabled)
+		})
+	}
 }
